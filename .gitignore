@@ -1,0 +1,42 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+
+# Binaries
+bin/
+vacuum_quad_engine/bin/
+quadriflow
+
+# 3D models and meshes
+*.glb
+*.gltf
+*.obj
+*.mtl
+*.ply
+*.stl
+*.off
+*.fbx
+
+# Binary data and archives
+*.zip
+*.tar
+*.gz
+*.npy
+*.npz
+
+# Render outputs and images
+*.png
+*.jpg
+*.jpeg
+outputs/
+tripo_smart_engine/outputs/
+tripo_smart_engine/gundam_parts/
+vacuum_quad_engine/assets/

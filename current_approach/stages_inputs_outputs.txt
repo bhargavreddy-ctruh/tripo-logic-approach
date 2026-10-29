@@ -1,0 +1,25 @@
+The entire pipeline processes data step-by-step as follows:
+
+| Step | What It Does (Simplest Words) | Input Files | Output Files |
+| --- | --- | --- | --- |
+| **Stage 1: Boundary Rails** | Finds and locks all sharp edges, seams, cut borders, and part junctions as 3D ribbons so quads don't blur across them. | `raw_asset.glb` | • `_stage1_rails.obj` *(3D wire-rail overlay for visual checking)*<br>
+
+<br>• Internal list of locked feature edges |
+| **Stage 2: Metric Tensor** | Measures surface curvature to decide where quads need to stretch into rectangles (limbs/blades) vs. stay small squares (bumps/details). | `raw_asset.glb` | • `_stage2_tensor.npy` *(numerical sizes & directions array)*<br>
+
+<br>• `_stage2_heatmap.obj` *(colored preview: blue = square, red = stretched)* |
+| **Stage 3: Cross-Field** | Directs which way quad edges point across the entire model, aligning along the Stage 1 rails and Stage 2 curvature lines. | • `raw_asset.glb`<br>
+
+<br>• `_stage2_tensor.npy`<br>
+
+<br>• Stage 1 locked edges | • `_stage3_field.npy` *(tangent direction vectors array)* |
+| **Stage 4: Quad Extraction** | Generates a clean carrier mesh matching your polygon budget and pairs adjacent triangles into stretched quads using Blossom matching. | • `raw_asset.glb`<br>
+
+<br>• `_stage2_tensor.npy`<br>
+
+<br>• `_stage3_field.npy` | • `_stage4_quads.obj` *(the raw extracted quad-dominant model)* |
+| **Stage 5: Surface Shrinkwrap** | Relaxes quad vertex positions to remove waviness, then snaps every vertex back onto the dense original mesh to preserve micro-detail. | • `raw_asset.glb` *(ground-truth reference)*<br>
+
+<br>• `_stage4_quads.obj` | • `_FINAL_RETOPO.obj` *(the final production-ready 3D model)* |
+
+Running `python pipeline.py raw_asset.glb` automatically executes this sequence from top to bottom, passing each intermediate file directly into the next stage.
