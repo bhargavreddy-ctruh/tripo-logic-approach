@@ -314,15 +314,15 @@ def step1_run_instant_meshes_per_component(base_obj, out_raw_remesh, target_face
                     if len(remapped) >= 3:
                         f.write("f " + " ".join(str(ri + 1) for ri in remapped) + "\n")
 
-            # Run Instant Meshes on this component
+            # Run Instant Meshes on this component in Pure Quad Mode
             comp_out_path = os.path.join(tmp_dir, f"comp_{comp_idx:04d}_remesh.obj")
             cmd = [
                 INSTANT_MESHES_BIN,
                 comp_obj_path,
                 "-o", comp_out_path,
                 "-f", str(comp_target),
-                "-S", "0",      # Zero smoothing — preserve sharp CAD chamfers
-                "-D",           # Quad-dominant mode
+                "-S", "2",      # 2-pass smoothing & reprojection onto original surface
+                # Note: -D omitted for 100% Pure Quad Mode (no stray triangles)
                 "-d",           # Deterministic
                 "-b",           # Boundary-aligned flow (KEY: aligns to this component's boundary)
                 "-c", str(crease_angle),

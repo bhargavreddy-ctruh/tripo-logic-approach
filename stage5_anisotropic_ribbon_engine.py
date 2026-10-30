@@ -167,25 +167,18 @@ def trace_full_transverse_loop(start_edge, flat_edges_set, protected_edges_set):
             cont = get_best_continuation(curr_v, curr_e)
 
             if cont is None:
-                # No valid continuation — check if this is a natural terminus:
-                # 1) Open boundary vertex
-                # 2) Irregular pole (valence != 4)
-                # 3) Touches a protected/crease edge
-                # 4) Any incident edge leaves the flat zone (dihedral > coplanar_rad)
-                is_at_boundary = (
-                    curr_v.is_boundary or
-                    len(curr_v.link_edges) != 4 or
-                    any(e in protected_edges_set for e in curr_v.link_edges) or
-                    any(len(e.link_faces) == 2 and e.link_faces[0].normal.length > 1e-4 and e.link_faces[1].normal.length > 1e-4 and e.link_faces[0].normal.angle(e.link_faces[1].normal) > math.radians(12.0) for e in curr_v.link_edges)
-                )
+                # Terminus is ONLY valid if it is a TRUE exterior mesh boundary or touches a protected crease rail.
+                # It must NEVER terminate at an internal irregular pole (valence != 4) in the middle of smooth panels!
+                is_at_boundary = curr_v.is_boundary or any(e in protected_edges_set for e in curr_v.link_edges)
                 return edges, is_at_boundary
 
             if cont in protected_edges_set:
                 return edges, True   # Hit a crease/boundary rail — valid terminus
 
             if cont not in flat_edges_set:
-                # Continuation leaves the flat zone — hit curvature boundary: valid terminus!
-                return edges, True
+                # Continuation leaves the flat zone — ONLY a valid terminus if it hits a protected crease rail or boundary!
+                is_crease_term = (cont in protected_edges_set) or curr_v.is_boundary or any(e in protected_edges_set for e in curr_v.link_edges)
+                return edges, is_crease_term
 
             if cont in visited:
                 return edges, True   # Closed ring — valid
@@ -288,97 +281,24 @@ def run_anisotropic_ribbon_engine(
     print(f"[*] Input: {initial_verts:,} verts | {initial_faces:,} faces")
 
     # =========================================================================
-    # STEP 0: WATERTIGHT HOLE SEALING
+    # STEP 0: CLEAN BOUNDARY PRESERVATION
     # =========================================================================
-    diag = (target_obj.dimensions.x**2 + target_obj.dimensions.y**2 + target_obj.dimensions.z**2)**0.5
-
+    # Tripo preserves open shells, cavities, and single-sided panels as clean,
+    # native boundary loops. Only tiny non-feature holes (<= 4 edges) are capped.
+    # We NEVER run brute-force holes_fill + triangulate on large open loops,
+    # which prevents starburst sliver triangle fans across planar cavities.
     init_b_edges = sum(1 for e in bm.edges if e.is_boundary)
     if init_b_edges > 0:
-        print(f"[*] Sealing {init_b_edges:,} open boundary edges...")
         b_edges = [e for e in bm.edges if e.is_boundary]
         try:
-            bmesh.ops.holes_fill(bm, edges=b_edges, sides=0)
+            bmesh.ops.holes_fill(bm, edges=b_edges, sides=4)
         except Exception:
             pass
         bm.edges.ensure_lookup_table()
         bm.faces.ensure_lookup_table()
-
-        rem_b_edges = [e for e in bm.edges if e.is_valid and e.is_boundary]
-        if rem_b_edges:
-            visited_e = set()
-            for start_e in rem_b_edges:
-                if start_e in visited_e:
-                    continue
-                loop_edges = [start_e]
-                visited_e.add(start_e)
-                curr_v = start_e.verts[1]
-                while True:
-                    nxt = None
-                    for cand in curr_v.link_edges:
-                        if cand.is_boundary and cand not in visited_e:
-                            nxt = cand
-                            break
-                    if nxt:
-                        visited_e.add(nxt)
-                        loop_edges.append(nxt)
-                        curr_v = nxt.other_vert(curr_v)
-                    else:
-                        break
-                v = loop_edges[0].verts[0]
-                c_verts = [v]
-                for e in loop_edges:
-                    v = e.other_vert(v)
-                    if v != c_verts[0]:
-                        c_verts.append(v)
-                if len(c_verts) >= 3:
-                    seen_v = {}
-                    split_done = False
-                    for idx, vert in enumerate(c_verts):
-                        if vert in seen_v:
-                            sub_c = c_verts[seen_v[vert]:idx]
-                            rem_c = c_verts[:seen_v[vert]] + c_verts[idx:]
-                            if len(sub_c) >= 3:
-                                try:
-                                    bm.faces.new(sub_c)
-                                except Exception:
-                                    pass
-                            if len(rem_c) >= 3:
-                                try:
-                                    bm.faces.new(rem_c)
-                                except Exception:
-                                    pass
-                            split_done = True
-                            break
-                        seen_v[vert] = idx
-                    if not split_done:
-                        try:
-                            bm.faces.new(c_verts)
-                        except Exception:
-                            try:
-                                bm.faces.new(list(reversed(c_verts)))
-                            except Exception:
-                                pass
-
-        bm.edges.ensure_lookup_table()
-        bm.faces.ensure_lookup_table()
-        ngons = [f for f in bm.faces if f.is_valid and len(f.verts) > 4]
-        if ngons:
-            res = bmesh.ops.triangulate(bm, faces=ngons, quad_method='BEAUTY', ngon_method='BEAUTY')
-            tri_faces = [f for f in res['faces'] if f.is_valid and len(f.verts) == 3]
-            bmesh.ops.join_triangles(bm, faces=tri_faces,
-                                     angle_face_threshold=math.radians(12.0),
-                                     angle_shape_threshold=math.radians(60.0))
-        for e in list(bm.edges):
-            if e.is_valid and len(e.link_faces) > 2:
-                faces = list(e.link_faces)
-                for f in faces[2:]:
-                    if f.is_valid:
-                        bm.faces.remove(f)
-        bm.edges.ensure_lookup_table()
-        bm.faces.ensure_lookup_table()
         bm.verts.ensure_lookup_table()
-        sealed = sum(1 for e in bm.edges if e.is_boundary)
-        print(f"[+] Sealed: {init_b_edges} -> {sealed} boundary edges")
+        b_rem = sum(1 for e in bm.edges if e.is_boundary)
+        print(f"[*] Boundary Preservation: {b_rem:,} native boundary edges preserved cleanly (no triangle fans).")
 
     # =========================================================================
     # STEP 1: FEATURE PROTECTION MASK
@@ -435,7 +355,7 @@ def run_anisotropic_ribbon_engine(
     # =========================================================================
     # STEP 2: MULTI-PASS FULL-RAIL TRANSVERSE DISSOLUTION
     # =========================================================================
-    coplanar_rad = math.radians(12.0)
+    coplanar_rad = crease_rad  # Match crease angle cutoff to unlock all smooth panels without dead-zone
     total_dissolved = 0
 
     for pass_idx in range(1, passes + 1):
