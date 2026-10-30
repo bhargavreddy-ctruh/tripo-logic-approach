@@ -167,11 +167,16 @@ def trace_full_transverse_loop(start_edge, flat_edges_set, protected_edges_set):
             cont = get_best_continuation(curr_v, curr_e)
 
             if cont is None:
-                # No valid continuation — check if this is a natural terminus
-                # (protected edge blocks it = valid boundary hit)
+                # No valid continuation — check if this is a natural terminus:
+                # 1) Open boundary vertex
+                # 2) Irregular pole (valence != 4)
+                # 3) Touches a protected/crease edge
+                # 4) Any incident edge leaves the flat zone (dihedral > coplanar_rad)
                 is_at_boundary = (
+                    curr_v.is_boundary or
+                    len(curr_v.link_edges) != 4 or
                     any(e in protected_edges_set for e in curr_v.link_edges) or
-                    len(curr_v.link_edges) < 4
+                    any(len(e.link_faces) == 2 and e.link_faces[0].normal.length > 1e-4 and e.link_faces[1].normal.length > 1e-4 and e.link_faces[0].normal.angle(e.link_faces[1].normal) > math.radians(12.0) for e in curr_v.link_edges)
                 )
                 return edges, is_at_boundary
 
@@ -179,8 +184,8 @@ def trace_full_transverse_loop(start_edge, flat_edges_set, protected_edges_set):
                 return edges, True   # Hit a crease/boundary rail — valid terminus
 
             if cont not in flat_edges_set:
-                # Continuation leaves the flat zone — hit curvature boundary
-                return edges, len(curr_v.link_edges) < 4 or curr_v.is_boundary
+                # Continuation leaves the flat zone — hit curvature boundary: valid terminus!
+                return edges, True
 
             if cont in visited:
                 return edges, True   # Closed ring — valid
@@ -244,7 +249,7 @@ def run_anisotropic_ribbon_engine(
     cad_ref_path=None,
     output_glb_path=None,
     preview_png_path=None,
-    passes=4,
+    passes=8,
     crease_angle_deg=18.0,
     feature_protect=True
 ):
@@ -424,8 +429,60 @@ def run_anisotropic_ribbon_engine(
                             for e in v.link_edges:
                                 protected_edges.add(e)
 
+    # =========================================================================
+    # STEP 1.5: FLOW RAIL LOCKING (Prevent longitudinal slats from being cut)
+    # =========================================================================
+    coplanar_rad = math.radians(12.0)
+    visited_f = set()
+    patches = []
+    for f in bm.faces:
+        if f in visited_f:
+            continue
+        patch = [f]
+        visited_f.add(f)
+        stack = [f]
+        while stack:
+            cur = stack.pop()
+            for e in cur.edges:
+                if e in protected_edges:
+                    continue
+                for nxt in e.link_faces:
+                    if nxt not in visited_f:
+                        n0, n1 = cur.normal, nxt.normal
+                        if n0.length > 1e-4 and n1.length > 1e-4:
+                            if n0.angle(n1) < coplanar_rad:
+                                visited_f.add(nxt)
+                                stack.append(nxt)
+                                patch.append(nxt)
+        if len(patch) >= 4:
+            patches.append(patch)
+
+    locked_flow_rails = set()
+    for patch in patches:
+        p_faces = set(patch)
+        p_verts = set()
+        for f in patch:
+            for v in f.verts:
+                p_verts.add((v.co.x, v.co.y, v.co.z))
+        if len(p_verts) < 6:
+            continue
+        pts = np.array(list(p_verts))
+        cov = np.cov(pts.T)
+        evals, evecs = np.linalg.eigh(cov)
+        flow_dir = mathutils.Vector(evecs[:, 2]).normalized()
+
+        for f in patch:
+            for e in f.edges:
+                if len(e.link_faces) == 2 and e.link_faces[0] in p_faces and e.link_faces[1] in p_faces:
+                    vec = (e.verts[1].co - e.verts[0].co)
+                    if vec.length > 1e-6:
+                        vec.normalize()
+                        if abs(vec.dot(flow_dir)) > 0.65:
+                            locked_flow_rails.add(e)
+
+    protected_edges.update(locked_flow_rails)
     pct = len(protected_edges) / max(len(bm.edges), 1) * 100.0
-    print(f"[*] Protection: {len(protected_edges):,} edges ({pct:.1f}%) locked. Flat panels open.")
+    print(f"[*] Protection: {len(protected_edges):,} edges ({pct:.1f}%) locked ({len(locked_flow_rails):,} longitudinal rails). Flat panels open.")
 
     # =========================================================================
     # STEP 2: MULTI-PASS FULL-RAIL TRANSVERSE DISSOLUTION
@@ -433,7 +490,6 @@ def run_anisotropic_ribbon_engine(
     # coplanar_rad: flat edge threshold — 12° captures flat CAD panels with
     # normal estimation noise from Instant Meshes (adds ~3-7° on flat panels)
     # without crossing the 18° crease boundary
-    coplanar_rad = math.radians(12.0)
     total_dissolved = 0
 
     for pass_idx in range(1, passes + 1):
@@ -506,15 +562,15 @@ def run_anisotropic_ribbon_engine(
         bmesh.ops.dissolve_edges(bm, edges=edges_to_dissolve, use_verts=False)
         total_dissolved += len(edges_to_dissolve)
 
-        # Dissolve collinear valence-2 vertices (straightens backbone)
+        # Dissolve collinear valence-2 vertices (straightens backbone and cleans boundary N-gons)
         bm.verts.ensure_lookup_table()
         v_dissolve = []
         for v in bm.verts:
-            if v.is_valid and len(v.link_edges) == 2 and not v.is_boundary:
+            if v.is_valid and len(v.link_edges) == 2:
                 e1, e2 = v.link_edges
                 d1 = (v.co - e1.other_vert(v).co).normalized()
                 d2 = (e2.other_vert(v).co - v.co).normalized()
-                if d1.dot(d2) > 0.90:
+                if d1.dot(d2) > 0.98:
                     v_dissolve.append(v)
         if v_dissolve:
             bmesh.ops.dissolve_verts(bm, verts=v_dissolve)
@@ -529,7 +585,7 @@ def run_anisotropic_ribbon_engine(
             if tri_faces:
                 bmesh.ops.join_triangles(bm, faces=tri_faces,
                                          angle_face_threshold=math.radians(16.0),
-                                         angle_shape_threshold=math.radians(85.0))
+                                         angle_shape_threshold=math.radians(88.0))
 
         # Coplanar zig-zag elimination per-pass
         bm.faces.ensure_lookup_table()
@@ -537,7 +593,7 @@ def run_anisotropic_ribbon_engine(
         if pass_tris:
             bmesh.ops.join_triangles(bm, faces=pass_tris,
                                      angle_face_threshold=math.radians(16.0),
-                                     angle_shape_threshold=math.radians(85.0))
+                                     angle_shape_threshold=math.radians(88.0))
 
         # Update protection with new crease edges
         bm.edges.ensure_lookup_table()
@@ -561,7 +617,7 @@ def run_anisotropic_ribbon_engine(
         tri_faces = [f for f in res['faces'] if f.is_valid and len(f.verts) == 3]
         bmesh.ops.join_triangles(bm, faces=tri_faces,
                                  angle_face_threshold=math.radians(16.0),
-                                 angle_shape_threshold=math.radians(85.0))
+                                 angle_shape_threshold=math.radians(88.0))
 
     # Master zig-zag pass: merge coplanar triangle pairs into clean quads
     bm.faces.ensure_lookup_table()
@@ -569,7 +625,7 @@ def run_anisotropic_ribbon_engine(
     if all_tris:
         bmesh.ops.join_triangles(bm, faces=all_tris,
                                  angle_face_threshold=math.radians(16.0),
-                                 angle_shape_threshold=math.radians(85.0))
+                                 angle_shape_threshold=math.radians(88.0))
 
     # Diamond dart adapters
     bm.faces.ensure_lookup_table()

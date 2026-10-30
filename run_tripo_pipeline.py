@@ -522,7 +522,7 @@ def step3_anisotropic_ribbon_engine(sanitized_obj, final_obj, cad_ref=None,
 # MASTER PIPELINE RUNNER
 # =============================================================================
 def run_master_pipeline(input_path, output_obj, output_glb=None, preview_png=None,
-                        target_faces=5000, passes=4, crease=18.0):
+                        target_faces=5000, passes=8, crease=18.0):
     check_dependencies()
     t_start = time.time()
 
@@ -594,7 +594,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_glb", default=None, help="Output real-time GLB")
     parser.add_argument("--preview", default=None, help="Wireframe preview PNG")
     parser.add_argument("--target_faces", type=int, default=5000)
-    parser.add_argument("--passes", type=int, default=4)
+    parser.add_argument("--passes", type=int, default=8)
     parser.add_argument("--crease", type=float, default=18.0)
     args = parser.parse_args()
 
