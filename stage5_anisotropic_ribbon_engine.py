@@ -429,67 +429,13 @@ def run_anisotropic_ribbon_engine(
                             for e in v.link_edges:
                                 protected_edges.add(e)
 
-    # =========================================================================
-    # STEP 1.5: FLOW RAIL LOCKING (Prevent longitudinal slats from being cut)
-    # =========================================================================
-    coplanar_rad = math.radians(12.0)
-    visited_f = set()
-    patches = []
-    for f in bm.faces:
-        if f in visited_f:
-            continue
-        patch = [f]
-        visited_f.add(f)
-        stack = [f]
-        while stack:
-            cur = stack.pop()
-            for e in cur.edges:
-                if e in protected_edges:
-                    continue
-                for nxt in e.link_faces:
-                    if nxt not in visited_f:
-                        n0, n1 = cur.normal, nxt.normal
-                        if n0.length > 1e-4 and n1.length > 1e-4:
-                            if n0.angle(n1) < coplanar_rad:
-                                visited_f.add(nxt)
-                                stack.append(nxt)
-                                patch.append(nxt)
-        if len(patch) >= 4:
-            patches.append(patch)
-
-    locked_flow_rails = set()
-    for patch in patches:
-        p_faces = set(patch)
-        p_verts = set()
-        for f in patch:
-            for v in f.verts:
-                p_verts.add((v.co.x, v.co.y, v.co.z))
-        if len(p_verts) < 6:
-            continue
-        pts = np.array(list(p_verts))
-        cov = np.cov(pts.T)
-        evals, evecs = np.linalg.eigh(cov)
-        flow_dir = mathutils.Vector(evecs[:, 2]).normalized()
-
-        for f in patch:
-            for e in f.edges:
-                if len(e.link_faces) == 2 and e.link_faces[0] in p_faces and e.link_faces[1] in p_faces:
-                    vec = (e.verts[1].co - e.verts[0].co)
-                    if vec.length > 1e-6:
-                        vec.normalize()
-                        if abs(vec.dot(flow_dir)) > 0.65:
-                            locked_flow_rails.add(e)
-
-    protected_edges.update(locked_flow_rails)
     pct = len(protected_edges) / max(len(bm.edges), 1) * 100.0
-    print(f"[*] Protection: {len(protected_edges):,} edges ({pct:.1f}%) locked ({len(locked_flow_rails):,} longitudinal rails). Flat panels open.")
+    print(f"[*] Protection: {len(protected_edges):,} edges ({pct:.1f}%) locked. Flat panels open.")
 
     # =========================================================================
     # STEP 2: MULTI-PASS FULL-RAIL TRANSVERSE DISSOLUTION
     # =========================================================================
-    # coplanar_rad: flat edge threshold — 12° captures flat CAD panels with
-    # normal estimation noise from Instant Meshes (adds ~3-7° on flat panels)
-    # without crossing the 18° crease boundary
+    coplanar_rad = math.radians(12.0)
     total_dissolved = 0
 
     for pass_idx in range(1, passes + 1):
