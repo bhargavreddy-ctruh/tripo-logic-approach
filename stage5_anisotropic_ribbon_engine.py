@@ -92,67 +92,21 @@ def compute_cad_split_normals(mesh, crease_rad=math.radians(18.0)):
 def trace_full_transverse_loop(start_edge, flat_edges_set, protected_edges_set):
     """
     Traces a COMPLETE transverse loop from start_edge in both directions.
-
-    Handles BOTH regular (valence-4) and irregular (valence-3,5,6) vertices:
-      - At valence-4: use the unique "opposite" edge (standard Alt+Click)
-      - At valence-3/5/6: use best-direction continuation — find the flat edge
-        that is most collinear with the incoming direction AND shares no face
-        with the incoming edge. This allows loops to cross singularities.
-
-    A valid rail must span from one protected/boundary edge to another, OR
-    be a closed ring (cylinder), OR be long enough (>= 4 edges) to be useful.
+    To prevent irregular zig-zag triangulation and unnecessary diagonal edges,
+    interior loop continuation strictly follows regular valence-4 vertices
+    (exact topological opposite), and terminates ONLY at a true feature boundary
+    or protected crease rail.
     """
-    def get_best_continuation(v, incoming_e):
-        """
-        At any valence vertex, find the best-matching continuation edge.
-        For valence-4: strict opposite (topological). 
-        For valence-3/5/6: best-direction (geometric — most collinear flat edge).
-        """
+    def get_continuation_edge(v, incoming_e):
         valence = len(v.link_edges)
-
-        # Standard topological opposite for valence-4
-        if valence == 4:
-            inc_faces = set(incoming_e.link_faces)
-            for e in v.link_edges:
-                if e != incoming_e and not (set(e.link_faces) & inc_faces):
-                    return e
+        if valence != 4:
             return None
-
-        # For boundary/too-low valence: stop — genuine boundary
-        if valence <= 2 or v.is_boundary:
-            return None
-
-        # For irregular valence (3, 5, 6+): best-direction geometric continuation
-        # Direction we're travelling
-        incoming_dir = (v.co - incoming_e.other_vert(v).co)
-        if incoming_dir.length < 1e-8:
-            return None
-        incoming_dir = incoming_dir.normalized()
-
         inc_faces = set(incoming_e.link_faces)
-        best_e = None
-        best_dot = 0.70  # Minimum collinearity threshold (allows up to ~45° turns)
-
         for e in v.link_edges:
-            if e == incoming_e:
-                continue
-            if e in protected_edges_set:
-                continue
-            if e not in flat_edges_set:
-                continue
-            # Must not share a face with incoming (avoids doubling back)
-            if set(e.link_faces) & inc_faces:
-                continue
-            e_dir = (e.other_vert(v).co - v.co)
-            if e_dir.length < 1e-8:
-                continue
-            e_dir = e_dir.normalized()
-            dot = incoming_dir.dot(e_dir)
-            if dot > best_dot:
-                best_dot = dot
-                best_e = e
-
-        return best_e
+            if e != incoming_e and not (set(e.link_faces) & inc_faces):
+                if e not in protected_edges_set and e in flat_edges_set:
+                    return e
+        return None
 
     def trace_direction(start_e, start_v):
         edges = []
@@ -160,28 +114,18 @@ def trace_full_transverse_loop(start_edge, flat_edges_set, protected_edges_set):
         curr_v = start_v
         visited = {start_e}
         while True:
-            # Boundary vertex: loop naturally ends here
-            if curr_v.is_boundary or len(curr_v.link_edges) <= 2:
+            # Reached genuine mesh boundary or protected crease rail
+            if curr_v.is_boundary or any(e in protected_edges_set for e in curr_v.link_edges):
                 return edges, True
 
-            cont = get_best_continuation(curr_v, curr_e)
-
+            cont = get_continuation_edge(curr_v, curr_e)
             if cont is None:
-                # Terminus is ONLY valid if it is a TRUE exterior mesh boundary or touches a protected crease rail.
-                # It must NEVER terminate at an internal irregular pole (valence != 4) in the middle of smooth panels!
+                # Terminus is valid ONLY if curr_v touches a protected crease or boundary
                 is_at_boundary = curr_v.is_boundary or any(e in protected_edges_set for e in curr_v.link_edges)
                 return edges, is_at_boundary
 
-            if cont in protected_edges_set:
-                return edges, True   # Hit a crease/boundary rail — valid terminus
-
-            if cont not in flat_edges_set:
-                # Continuation leaves the flat zone — ONLY a valid terminus if it hits a protected crease rail or boundary!
-                is_crease_term = (cont in protected_edges_set) or curr_v.is_boundary or any(e in protected_edges_set for e in curr_v.link_edges)
-                return edges, is_crease_term
-
             if cont in visited:
-                return edges, True   # Closed ring — valid
+                return edges, True   # Closed ring
 
             visited.add(cont)
             edges.append(cont)
@@ -196,15 +140,14 @@ def trace_full_transverse_loop(start_edge, flat_edges_set, protected_edges_set):
     is_closed_ring = (
         len(back_edges) > 0 and len(fwd_edges) > 0 and
         len(back_edges) + len(fwd_edges) > 2 and
-        back_edges[-1] == fwd_edges[-1]
+        (start_edge.verts[0] == fwd_edges[-1].other_vert(curr_v if 'curr_v' in locals() else start_edge.verts[1]) or
+         back_hit and fwd_hit)
     )
 
-    # STRICT BOUNDARY-TO-BOUNDARY VALIDATION (Zero-tolerance for zig-zags):
-    # The loop MUST be a complete rail spanning from a true feature boundary to another
-    # feature boundary on both ends, OR be a closed ring (e.g. cylindrical loop).
-    # NEVER dissolve a partial loop that terminates mid-patch — partial dissolution
-    # creates T-junctions, N-gons, and diagonal zig-zag triangulation lines!
-    if not ((back_hit and fwd_hit) or is_closed_ring):
+    # STRICT BOUNDARY-TO-BOUNDARY VALIDATION:
+    # Must span completely from one boundary/crease to another, or be a closed ring.
+    # Never dissolve a partial loop that terminates mid-panel.
+    if not (back_hit and fwd_hit):
         return None
 
     if len(full_loop) < 2:
@@ -281,24 +224,31 @@ def run_anisotropic_ribbon_engine(
     print(f"[*] Input: {initial_verts:,} verts | {initial_faces:,} faces")
 
     # =========================================================================
-    # STEP 0: CLEAN BOUNDARY PRESERVATION
+    # STEP 0: CLEAN WATERTIGHT BOUNDARY HEALING
     # =========================================================================
-    # Tripo preserves open shells, cavities, and single-sided panels as clean,
-    # native boundary loops. Only tiny non-feature holes (<= 4 edges) are capped.
-    # We NEVER run brute-force holes_fill + triangulate on large open loops,
-    # which prevents starburst sliver triangle fans across planar cavities.
+    # Automatically seals all open topological holes and gaps from remeshing,
+    # preventing missing panels, severed appendages, and internal voids.
     init_b_edges = sum(1 for e in bm.edges if e.is_boundary)
     if init_b_edges > 0:
         b_edges = [e for e in bm.edges if e.is_boundary]
         try:
-            bmesh.ops.holes_fill(bm, edges=b_edges, sides=4)
-        except Exception:
-            pass
+            bmesh.ops.holes_fill(bm, edges=b_edges, sides=0)
+            bm.faces.ensure_lookup_table()
+            bm.edges.ensure_lookup_table()
+            bm.verts.ensure_lookup_table()
+            # Convert any resulting triangle pairs on filled holes to clean quads
+            fill_tris = [f for f in bm.faces if len(f.verts) == 3]
+            if fill_tris:
+                bmesh.ops.join_triangles(bm, faces=fill_tris,
+                                         angle_face_threshold=math.radians(35.0),
+                                         angle_shape_threshold=math.radians(90.0))
+        except Exception as e:
+            print(f"[*] Hole fill note: {e}")
         bm.edges.ensure_lookup_table()
         bm.faces.ensure_lookup_table()
         bm.verts.ensure_lookup_table()
         b_rem = sum(1 for e in bm.edges if e.is_boundary)
-        print(f"[*] Boundary Preservation: {b_rem:,} native boundary edges preserved cleanly (no triangle fans).")
+        print(f"[*] Watertight Boundary Healing: Sealed {init_b_edges - b_rem:,} hole edges (remaining: {b_rem:,}).")
 
     # =========================================================================
     # STEP 1: FEATURE PROTECTION MASK
@@ -425,18 +375,18 @@ def run_anisotropic_ribbon_engine(
             break
 
         print(f"    -> Dissolving {len(edges_to_dissolve):,} edges across {len(dissolve_loops):,} rails...")
-        bmesh.ops.dissolve_edges(bm, edges=edges_to_dissolve, use_verts=False)
+        bmesh.ops.dissolve_edges(bm, edges=edges_to_dissolve, use_verts=True)
         total_dissolved += len(edges_to_dissolve)
 
         # Dissolve collinear valence-2 vertices (straightens backbone and cleans boundary N-gons)
         bm.verts.ensure_lookup_table()
         v_dissolve = []
         for v in bm.verts:
-            if v.is_valid and len(v.link_edges) == 2:
+            if v.is_valid and len(v.link_edges) == 2 and v not in protected_edges:
                 e1, e2 = v.link_edges
                 d1 = (v.co - e1.other_vert(v).co).normalized()
                 d2 = (e2.other_vert(v).co - v.co).normalized()
-                if d1.dot(d2) > 0.98:
+                if d1.dot(d2) > 0.85:
                     v_dissolve.append(v)
         if v_dissolve:
             bmesh.ops.dissolve_verts(bm, verts=v_dissolve)
@@ -450,16 +400,16 @@ def run_anisotropic_ribbon_engine(
             tri_faces = [f for f in res['faces'] if f.is_valid and len(f.verts) == 3]
             if tri_faces:
                 bmesh.ops.join_triangles(bm, faces=tri_faces,
-                                         angle_face_threshold=math.radians(16.0),
-                                         angle_shape_threshold=math.radians(88.0))
+                                         angle_face_threshold=math.radians(24.0),
+                                         angle_shape_threshold=math.radians(90.0))
 
         # Coplanar zig-zag elimination per-pass
         bm.faces.ensure_lookup_table()
         pass_tris = [f for f in bm.faces if f.is_valid and len(f.verts) == 3]
         if pass_tris:
             bmesh.ops.join_triangles(bm, faces=pass_tris,
-                                     angle_face_threshold=math.radians(16.0),
-                                     angle_shape_threshold=math.radians(88.0))
+                                     angle_face_threshold=math.radians(24.0),
+                                     angle_shape_threshold=math.radians(90.0))
 
         # Update protection with new crease edges
         bm.edges.ensure_lookup_table()
@@ -490,8 +440,8 @@ def run_anisotropic_ribbon_engine(
     all_tris = [f for f in bm.faces if f.is_valid and len(f.verts) == 3]
     if all_tris:
         bmesh.ops.join_triangles(bm, faces=all_tris,
-                                 angle_face_threshold=math.radians(16.0),
-                                 angle_shape_threshold=math.radians(88.0))
+                                 angle_face_threshold=math.radians(24.0),
+                                 angle_shape_threshold=math.radians(90.0))
 
     # Diamond dart adapters
     bm.faces.ensure_lookup_table()
@@ -675,7 +625,7 @@ def run_anisotropic_ribbon_engine(
         mod = wire_obj.modifiers.new(name="Wire", type='WIREFRAME')
         mod.thickness = max(0.0008, max_dim * 0.0009)
         mod.use_replace = True
-        mod.use_even_offset = True
+        mod.use_even_offset = False
 
         l1 = bpy.data.lights.new(name='Key', type='SUN')
         l1.energy = 5.0

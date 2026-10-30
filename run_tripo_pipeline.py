@@ -284,7 +284,12 @@ def step1_run_instant_meshes_per_component(base_obj, out_raw_remesh, target_face
             comp_proxy = max(comp_faces_count, 1)
 
             # Proportional face allocation, minimum 50
-            comp_target = max(50, int(target_faces * comp_proxy / total_proxy))
+            # For high-density complex mechanical shells (antennas, blades, horns),
+            # ensure adequate resolution (minimum 35k) so fine features never collapse.
+            if comp_faces_count > 100000:
+                comp_target = max(35000, int(target_faces * comp_proxy / total_proxy))
+            else:
+                comp_target = max(50, int(target_faces * comp_proxy / total_proxy))
 
             # Write this component as a standalone OBJ
             comp_obj_path = os.path.join(tmp_dir, f"comp_{comp_idx:04d}.obj")
@@ -430,6 +435,16 @@ for e in list(bm.edges):
         for f in faces[2:]:
             if f.is_valid:
                 bm.faces.remove(f)
+bm.edges.ensure_lookup_table()
+bm.faces.ensure_lookup_table()
+
+# Seal open boundary holes from raw remesh to guarantee watertight surface
+b_edges = [e for e in bm.edges if e.is_boundary]
+if b_edges:
+    try:
+        bmesh.ops.holes_fill(bm, edges=b_edges, sides=0)
+    except Exception:
+        pass
 bm.edges.ensure_lookup_table()
 bm.faces.ensure_lookup_table()
 
