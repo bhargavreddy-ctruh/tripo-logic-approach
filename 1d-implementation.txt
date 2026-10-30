@@ -1,0 +1,68 @@
+### Implementation Plan: True 1D Anisotropic Quad Ribbon Engine
+
+The goal is to transform isotropic checkerboard retopo meshes into **production-grade anisotropic models (matching Tripo)**, featuring long, uninterrupted quad ribbons across planar and cylindrical regions while locking all 3D features, silhouettes, and bevels.
+
+---
+
+### Phase 1: Coplanar Patch & Flow Detection
+1. **Cluster Coplanar Face Patches:**
+   * Group adjacent quad faces where normal divergence is $\le 3.5^\circ$.
+   * Hard boundaries: Any edge classified as a **Step 1 Feature Rail** or a sharp crease ($> 15^\circ$) acts as an impenetrable partition between patches.
+2. **Determine Dominant Flow Vector ($\mathbf{v}_{\text{flow}}$):**
+   * For each planar patch, find the longest bounding rail/perimeter edge.
+   * This vector $\mathbf{v}_{\text{flow}}$ defines the direction the quad strips will run (e.g. vertical down the sofa base, horizontal across the back panel, along the sword blade).
+
+---
+
+### Phase 2: Transverse Edge Loop Extraction
+1. **Trace Edge Loops Across Patches:**
+   * In a quad, opposite edges run in the same direction.
+   * Trace continuous edge loops running **perpendicular** to $\mathbf{v}_{\text{flow}}$ ($\mathbf{e}_{\text{dir}} \cdot \mathbf{v}_{\text{flow}} \approx 0$).
+2. **Select Non-Adjacent Alternating Loops:**
+   * Mark alternating parallel loops for dissolution to systematically double, quadruple, or $8\times$ the quad aspect ratio along $\mathbf{v}_{\text{flow}}$.
+
+---
+
+### Phase 3: Clean Loop Dissolution & Collinear Vertex Elimination
+1. **Batch Edge Dissolution:**
+   * Dissolve all edges in the selected transverse loops simultaneously using BMesh (`bmesh.ops.dissolve_edges`).
+2. **Collinear Valence-2 Vertex Dissolution:**
+   * In the interior of the dissolved loops, vertices that previously had valence 4 now have valence 2 (they sit along a straight edge line).
+   * Dissolve all valence-2 vertices where the two incident edges are collinear ($\ge 0.94$ dot product).
+   * **Result:** Merged faces become **true, uninterrupted 4-sided rectangular QUADS** stretching along $\mathbf{v}_{\text{flow}}$ ($10:1$ to $30:1$ aspect ratio).
+
+---
+
+### Phase 4: Geometry-Aware Quad / Triangle Selection (Shape-Preserving Triangles)
+1. **Rule: Never Force a Distorted Quad Over a Natural Triangle:**
+   * In regions where geometry is naturally triangular (e.g., triangular chest facets around the arc reactor in the armored man, pinched armor corners, diagonal relief creases):
+     * **Do not force a twisted or non-planar quad.**
+     * Allow clean, intentional triangles that preserve the exact sharp profile and shading normals without geometric warping.
+2. **Perimeter Singularity Handling:**
+   * At the corners where the flat patch meets a curved bevel or foot (like the sofa legs in Image 1), terminal faces with $> 4$ vertices are triangulated.
+3. **Smart Quad Pairing (`join_triangles`):**
+   * Adjacent transition triangles are re-paired into quads **only if** the resulting quad is planar (coplanarity $\le 5^\circ$) and non-inverted (convex).
+   * If pairing two triangles would create a non-planar twisted quad, they **remain clean triangles**.
+   * **Benchmark Target:** Matches Tripo's exact production balance (**$70\%\text{--}80\%$ Quads, $20\%\text{--}30\%$ Triangles, Strictly 0 N-gons**).
+
+---
+
+### Phase 5: Verification & Inspection
+We run the engine asset-by-asset and generate wireframe inspection renders:
+1. **Sectional Sofa (`testsample1_raw_860k.glb`)**: Verify base and back panels match your reference screenshots (zero cross-cuts, clean parallel quad slats).
+2. **Mecha (`002.glb`)**: Verify wings, armor plates, and shield collapse into razor-straight quad strips while antennae and bevels stay 100% sharp.
+3. **Sword (`jade_sword.glb`)**: Verify blade flanks become continuous single-strip quad ribbons from hilt to tip.
+4. **Armored Man (`c1.obj`)**: Verify chest plate and gauntlets become clean quad slats while anatomical joints retain flexible deformation loops.
+
+---
+
+### What You Should Look For in the Output:
+* **Planar areas:** Long, razor-straight parallel quad planks with zero diagonal splits or checkerboard noise.
+* **Curved / Beveled areas:** Dense, smooth edge loops hugging the curvature.
+* **Volume / 3D shape:** Zero shrinkage, zero distortion, 100% full 3D solid mesh.
+* **Topology:** Strictly 0 N-gons, all interior faces are quads.
+
+---
+
+### Confirmation to Proceed
+If this plan matches your expectations, reply to confirm and we will begin with **Step 1 on the Sofa** to replicate the exact visual quality of your screenshots.
